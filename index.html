@@ -11300,33 +11300,159 @@ function closeOutcome(){
 }
 
 // ── Voice initialisation — pick best available English voice ─────────────────
+// ═══════════════════════════════════════════════════════════════════
+// CINEMATIC VOICE CASTING — per-persona neural voices
+// Sarah (Buyer) → calm strategic female VP of Supply Chain
+// David (Planner) → confident, faster-paced male production planner
+// Maria (Plant)  → energetic, sharp female plant operations leader
+// Each profile selects the best premium neural voice the browser has,
+// with character-appropriate rate, pitch, and conversational pauses.
+// ═══════════════════════════════════════════════════════════════════
+const VOICE_PROFILES = {
+  buyer: {
+    // Sarah Mitchell — Strategic Sourcing Buyer / VP voice
+    candidates: [
+      'Microsoft Aria Online (Natural) - English (United States)',
+      'Microsoft Jenny Online (Natural) - English (United States)',
+      'Microsoft Libby Online (Natural) - English (United Kingdom)',
+      'Microsoft Sonia Online (Natural) - English (United Kingdom)',
+      'Microsoft Emma Online (Natural) - English (United States)',
+      'Google UK English Female',
+      'Samantha','Karen','Victoria','Allison','Susan','Tessa','Fiona','Catherine',
+    ],
+    gender: 'female',
+    rate:   0.98,
+    pitch:  1.0,
+    volume: 1.0,
+    sentencePauseMs: 220,    // calm, executive cadence
+  },
+  planner: {
+    // David Chen — Production Planner, confident
+    candidates: [
+      'Microsoft Guy Online (Natural) - English (United States)',
+      'Microsoft Davis Online (Natural) - English (United States)',
+      'Microsoft Ryan Online (Natural) - English (United Kingdom)',
+      'Microsoft Andrew Online (Natural) - English (United States)',
+      'Microsoft Brian Online (Natural) - English (United States)',
+      'Google UK English Male',
+      'Daniel','Alex','Fred','James',
+    ],
+    gender: 'male',
+    rate:   1.02,
+    pitch:  0.98,
+    volume: 1.0,
+    sentencePauseMs: 180,
+  },
+  plant: {
+    // Maria Gonzalez — Plant Operations Manager, energetic/sharp
+    candidates: [
+      'Microsoft Jenny Online (Natural) - English (United States)',
+      'Microsoft Aria Online (Natural) - English (United States)',
+      'Microsoft Sonia Online (Natural) - English (United Kingdom)',
+      'Microsoft Emma Online (Natural) - English (United States)',
+      'Google US English',
+      'Samantha','Moira','Karen','Tessa',
+    ],
+    gender: 'female',
+    rate:   1.04,
+    pitch:  1.03,
+    volume: 1.0,
+    sentencePauseMs: 160,    // brisker pace — operations leader
+  },
+  expert: {
+    candidates: [
+      'Microsoft Aria Online (Natural) - English (United States)',
+      'Microsoft Guy Online (Natural) - English (United States)',
+      'Google US English',
+    ],
+    gender: null,
+    rate:   1.0,
+    pitch:  1.0,
+    volume: 1.0,
+    sentencePauseMs: 200,
+  },
+};
+
+let _demoVoices = {};   // persona → SpeechSynthesisVoice
+
+// Regex hints for fallback voice selection when no premium voice matches
+const _VOICE_FEMALE_HINTS = /aria|jenny|libby|sonia|emma|samantha|karen|victoria|moira|allison|susan|tessa|fiona|catherine|veena|kate|female|woman/i;
+const _VOICE_MALE_HINTS   = /guy|davis|ryan|andrew|brian|daniel|alex|fred|james|ralph|bruce|junior|david|male\b|\bman\b/i;
+
 function demoInitVoice(){
   if(!window.speechSynthesis) return;
   const load = ()=>{
     const voices = speechSynthesis.getVoices();
-    if(!voices.length) return;
-    // David Chen persona — male voice priority
-    const preferred = [
-      'Google UK English Male',
-      'Microsoft Guy Online (Natural) - English (United States)',
-      'Microsoft Ryan Online (Natural) - English (United Kingdom)',
-      'Microsoft Davis Online (Natural) - English (United States)',
-      'Microsoft James Online (Natural) - English (United Kingdom)',
-      'Daniel','Alex','Fred','Ralph','Bruce','Junior',
-      'Google US English',
-    ];
-    for(const name of preferred){
-      const v = voices.find(v=>v.name===name);
-      if(v){ _demoVoice = v; break; }
-    }
-    if(!_demoVoice){
-      _demoVoice = voices.find(v=>v.lang.startsWith('en-') && /male|guy|man|david|daniel|james|ryan|alex|fred|ralph/i.test(v.name))
-                || voices.find(v=>v.lang.startsWith('en-'))
-                || voices[0];
-    }
+    if(!voices.length) return false;
+
+    let anyAssigned = false;
+    Object.keys(VOICE_PROFILES).forEach(personaKey=>{
+      const profile = VOICE_PROFILES[personaKey];
+      let picked = null;
+      // 1. Try premium named candidates in priority order
+      for(const name of profile.candidates){
+        const v = voices.find(vv => vv.name === name);
+        if(v){ picked = v; break; }
+      }
+      // 2. Fallback by gender hint matching English voices
+      if(!picked){
+        if(profile.gender === 'female'){
+          picked = voices.find(v => v.lang && v.lang.startsWith('en-') && _VOICE_FEMALE_HINTS.test(v.name));
+        } else if(profile.gender === 'male'){
+          picked = voices.find(v => v.lang && v.lang.startsWith('en-') && _VOICE_MALE_HINTS.test(v.name));
+        }
+      }
+      // 3. Last resort: any English voice
+      if(!picked){
+        picked = voices.find(v => v.lang && v.lang.startsWith('en-')) || voices[0];
+      }
+      if(picked){
+        _demoVoices[personaKey] = picked;
+        anyAssigned = true;
+      }
+    });
+
+    // Legacy compatibility — keep _demoVoice pointing at the active persona's voice
+    _demoVoice = _demoVoices[_activePersona || 'buyer'] || _demoVoices.buyer || null;
+    return anyAssigned;
   };
-  load();
-  if(!_demoVoice) speechSynthesis.onvoiceschanged = load;
+
+  // First attempt — voices may not be loaded yet on some browsers
+  const ok = load();
+  if(!ok || !_demoVoices.buyer){
+    speechSynthesis.onvoiceschanged = ()=>{ load(); };
+  }
+}
+
+// Expand acronyms and tighten punctuation so the TTS reads naturally and pronounces
+// supply-chain terminology correctly without sounding spelled-out.
+function _prepareNarrationText(text){
+  if(!text) return text;
+  let s = text;
+  // Acronyms with dots → full words
+  s = s.replace(/\bP\.O\.A\./g, 'Purchase Order Acknowledgement');
+  s = s.replace(/\bP\.F\./g,    'Production Finish');
+  s = s.replace(/\bP\.S\./g,    'Production Start');
+  s = s.replace(/\bP\.O\./g,    'Purchase Order');
+  s = s.replace(/\bO\.T\.I\.F\./g, 'on time in full');
+  s = s.replace(/\bS\.L\.A\./g, 'S L A');
+  s = s.replace(/\bE\.D\.I\./g, 'E D I');
+  s = s.replace(/\bV\.P\./g,    'V P');
+  // Bare acronyms (no dots) that TTS otherwise mispronounces
+  s = s.replace(/\bPOA\b/g,  'Purchase Order Acknowledgement');
+  s = s.replace(/\bOTIF\b/g, 'on time in full');
+  s = s.replace(/\bMRP\b/g,  'material requirements planning');
+  s = s.replace(/\bERP\b/g,  'E R P');
+  s = s.replace(/\bTMS\b/g,  'T M S');
+  s = s.replace(/\bWMS\b/g,  'W M S');
+  s = s.replace(/\bBOM\b/g,  'bill of materials');
+  s = s.replace(/\bSMS\b/g,  'text message');
+  s = s.replace(/\bEBITDA\b/g,'E BIT da');
+  // Em dash → comma+pause for natural prosody
+  s = s.replace(/\s—\s/g, ', ');
+  // Collapse double spaces
+  s = s.replace(/\s+/g, ' ');
+  return s.trim();
 }
 
 // ── Speak a line of narration ────────────────────────────────────────────────
@@ -11337,8 +11463,16 @@ function demoSpeak(text, onEnd){
   const _spAv = document.getElementById('demo-avatar');
   if(_spAv) _spAv.classList.add('av-speaking');
 
+  // Pick this persona's voice + profile
+  const personaKey = _activePersona || 'buyer';
+  const profile    = VOICE_PROFILES[personaKey] || VOICE_PROFILES.buyer;
+  const voice      = _demoVoices[personaKey] || _demoVoice || null;
+
+  // Preprocess text for natural delivery + correct acronym pronunciation
+  const prepared = _prepareNarrationText(text);
+
   // Split into sentences for more natural delivery
-  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  const sentences = prepared.match(/[^.!?]+[.!?]+/g) || [prepared];
   let idx = 0;
 
   function speakNext(){
@@ -11350,16 +11484,19 @@ function demoSpeak(text, onEnd){
       return;
     }
     const utt = new SpeechSynthesisUtterance(sentences[idx].trim());
-    utt.voice  = _demoVoice;
-    utt.rate   = 0.92;   // slightly slower than default for clarity
-    utt.pitch  = 1.0;
-    utt.volume = 1.0;
-    utt.onend  = ()=>{ idx++; speakNext(); };
-    utt.onerror= ()=>{ idx++; speakNext(); };
+    if(voice) utt.voice = voice;
+    utt.rate   = profile.rate;
+    utt.pitch  = profile.pitch;
+    utt.volume = profile.volume;
+    if(voice && voice.lang) utt.lang = voice.lang;
+
+    utt.onend = ()=>{
+      idx++;
+      // Conversational pause between sentences — small breath for natural cadence
+      setTimeout(speakNext, profile.sentencePauseMs);
+    };
+    utt.onerror = ()=>{ idx++; speakNext(); };
     speechSynthesis.speak(utt);
-    // BUG-FIX: previously incremented idx here AND in onend, which skipped
-    // every other sentence (e.g. dropped "Here's the thing most people don't realize…").
-    // idx is now incremented only when the utterance ends/errors.
 
     // Update typewriter display while speaking — show what's about to be spoken
     demoTypewriter(sentences.slice(0, idx+1).join(' '), (idx+1) * 800);
