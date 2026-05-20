@@ -11208,7 +11208,11 @@ const DEMO_SCRIPT_EXPERT = [
     section:'alerts', label:'ALERT QUEUE — SUPPLIER NOTIFICATIONS', title:'Every outbound alert drafted and dispatched by the system',
     text:'Critical escalations and high-risk notices sent to the right contacts before the buyer logs in.',
     narration:"The Alert Queue shows every outbound notification SWAT has sent on the buyer's behalf. Critical escalation letters, high-risk notices, acknowledgement chasers — all drafted from templates, addressed to the right supplier contact, and dispatched at the right time. The queue shows timestamp, severity, recipient, and status. Suppliers receive these before the buyer makes their first phone call, which means when the buyer does call, the supplier has already seen the formal notice, already checked internally, and the conversation is far more productive. SWAT also supports custom alert rules in the Rules Engine — you can configure thresholds, escalation paths, and recipient groups specific to your procurement policy.",
-    duration:22000, pointer:'#alert-list',
+    duration:24000, pointer:'#alert-list',
+    subPoints:[
+      // ~10s: narrator describes timestamps + delivery — shift to the agent communication log
+      {at:10000, pointer:'#alert-log'},
+    ],
     fn:()=>{},
     ticker:[
       {type:'error',ico:'🚨',txt:'<strong>Escalation sent</strong> → TrailFlex · 6:42 AM',delay:1500},
@@ -11244,7 +11248,13 @@ const DEMO_SCRIPT_EXPERT = [
     section:'demand', label:'DEMAND SIGNALS — ERP INTEGRATION', title:'Live demand data synced from ERP — need dates, volumes, model mix',
     text:'When demand shifts, SWAT re-scores every affected issue automatically.',
     narration:"Demand data flows into SWAT continuously from your ERP system. Monthly demand by product model, annual volumes, and most importantly — need dates for every open issue. When demand changes — a pull-in, a push-out, a volume spike — SWAT detects the delta and re-scores every affected issue automatically. If a need date moves earlier by five days and the supplier hasn't confirmed shipment, that issue's risk score jumps immediately and it rises in the worklist. No one has to manually update a spreadsheet. The Demand Dashboard also shows you forecast versus actuals by model, capacity utilisation, and the coverage ratio — the ratio of confirmed supply to demand over the next twelve months. This is where supply chain decisions get connected to commercial reality.",
-    duration:24000, pointer:null,
+    duration:28000, pointer:'#demand-table',
+    subPoints:[
+      // ~17s: "forecast versus actuals by model"
+      {at:17000, pointer:'#forecast-actual-chart'},
+      // ~22s: "capacity utilisation"
+      {at:22000, pointer:'#capacity-table'},
+    ],
     fn:()=>{try{setTimeout(()=>{renderDemandChart();renderCapacityTable();},80);}catch(e){}},
     ticker:[
       {type:'success',ico:'📈',txt:'<strong>ERP sync live</strong> — demand signals updated',delay:2000},
@@ -11254,7 +11264,7 @@ const DEMO_SCRIPT_EXPERT = [
     section:'bom', label:'BOM — BILL OF MATERIALS', title:'Every part, every product line, every supplier — mapped',
     text:'The structural foundation that connects supply issues to production impact.',
     narration:"The Bill of Materials view maps every component to its parent product line. For each part, you can see the supplier, the lead time, the quantity per build, the cost, and any open issues currently affecting that component. This is what connects a supplier delay to a production consequence. When SWAT shows you that the rear shock absorber for the Dirt model is twenty-two days late, it's because the BOM tells it that this part is on the critical path for twenty-six hundred units per month. Without the BOM integration, a delay is just a delay. With it, SWAT knows which models are at risk, which months are affected, and what the downstream production impact is. The BOM Advisor AI panel lets you ask natural language questions about any component or assembly.",
-    duration:24000, pointer:null,
+    duration:24000, pointer:'#bom-tbody',
     fn:()=>{try{renderBOM();}catch(e){}},
     ticker:[
       {type:'success',ico:'🔩',txt:'<strong>BOM loaded</strong> — 5 product lines · 263 tracked parts',delay:2000},
@@ -11264,7 +11274,7 @@ const DEMO_SCRIPT_EXPERT = [
     section:'tms', label:'TMS — LOGISTICS TRACKING', title:'Shipment events, carrier updates, and customs holds — live',
     text:'Logistics signals feed the risk model just like supplier communications do.',
     narration:"The TMS and WMS feed brings logistics tracking data into SWAT. Shipment events — departed origin, arrived port, customs hold, delivered to warehouse — all flow in and update the corresponding PO milestones automatically. When a shipment is marked Departed, the Shipment milestone closes. When it shows a customs hold, the risk score for that issue increases and a TMS alert fires. This means SWAT isn't just tracking what suppliers say they'll do — it's tracking what's actually happening in the physical movement of goods. Combined with the External Threat Watch signals — port congestion, weather events, geopolitical risks — SWAT gives you the most complete picture of in-transit risk available without making a single phone call.",
-    duration:22000, pointer:null,
+    duration:22000, pointer:'#tms-feed-tbody',
     fn:()=>{try{renderTMSFeed();renderMapping();}catch(e){}},
     ticker:[
       {type:'success',ico:'🚢',txt:'<strong>TMS live</strong> — shipment events tracking',delay:2000},
@@ -11438,14 +11448,20 @@ const VOICE_PROFILES = {
     sentencePauseMs: 160,    // brisker pace — operations leader
   },
   expert: {
+    // Alex Rivera — Product Expert / CoreHelix
+    // Male, supply-chain professional, calm + practical + business-focused
     candidates: [
-      'Microsoft Aria Online (Natural) - English (United States)',
       'Microsoft Guy Online (Natural) - English (United States)',
-      'Google US English',
+      'Microsoft Davis Online (Natural) - English (United States)',
+      'Microsoft Andrew Online (Natural) - English (United States)',
+      'Microsoft Brian Online (Natural) - English (United States)',
+      'Microsoft Ryan Online (Natural) - English (United Kingdom)',
+      'Google UK English Male',
+      'Daniel','Alex','Fred','James',
     ],
-    gender: null,
+    gender: 'male',
     rate:   1.0,
-    pitch:  1.0,
+    pitch:  0.97,            // slightly lower for confident, calm authority
     volume: 1.0,
     sentencePauseMs: 200,
   },
@@ -12128,6 +12144,8 @@ function startDemo(){
   _piEl('dpi-role',     pi.role);
   _piEl('dpi-context',  pi.context);
   _piEl('dpi-bio',      pi.bio);
+  // Tag label adapts per persona (Day-in-the-Life vs Platform Tour)
+  _piEl('dpi-tag', _activePersona === 'expert' ? 'Platform Tour' : 'A Day in the Life');
 
   // Update legacy narrator (hidden but kept for compatibility)
   const pAvEl = document.getElementById('dn-persona-avatar');
@@ -13776,7 +13794,7 @@ setTimeout(()=>{ try{ mountDashboardOps(); }catch(e){} }, 250);
 <!-- ══ PERSONA INTRO OVERLAY ══ -->
 <div id="demo-persona-intro" aria-hidden="true">
   <div class="dpi-card">
-    <div class="dpi-tag">A Day in the Life</div>
+    <div class="dpi-tag" id="dpi-tag">A Day in the Life</div>
     <div class="dpi-avatar" id="dpi-avatar"><span id="dpi-initials">SM</span></div>
     <div class="dpi-name" id="dpi-name">Sarah Mitchell</div>
     <div class="dpi-role" id="dpi-role">Strategic Sourcing Buyer</div>
