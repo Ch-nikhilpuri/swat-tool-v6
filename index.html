@@ -11846,11 +11846,16 @@ function _clearRingOnly(){
   if(sp){sp.innerHTML='';sp.style.display='none';}
 }
 
-// Returns true if the current demo step has cursorOnly:true (just point + scroll,
-// no spotlight box, no ring, no dimming overlay).
+// Returns true when the current demo step should suppress the highlight box
+// and use ONLY the smooth mouse pointer for guidance. Triggered by:
+//   1) Per-step opt-in:  step.cursorOnly === true  OR  step.disableHighlight === true
+//   2) Persona override: Alex Rivera (expert) — pointer-only Platform Tour
+// Sarah / David / Maria keep their existing highlight system intact.
 function _isCursorOnlyStep(){
   const step = _activeDemoScript && _activeDemoScript[_demoStep];
-  return !!(step && step.cursorOnly === true);
+  if(step && (step.cursorOnly === true || step.disableHighlight === true)) return true;
+  if(_activePersona === 'expert') return true;          // Alex Rivera — pointer-only mode
+  return false;
 }
 
 // ── Sub-point spotlight movement ──────────────────────────────────────────
@@ -12348,6 +12353,11 @@ function exitDemo(){
   if(mtgFrame) mtgFrame.classList.remove('active');
   if(_mtgTimerInterval){ clearInterval(_mtgTimerInterval); _mtgTimerInterval=null; }
   _mtgStopLipSync(); _mtgStopBlink(); _mtgStopGaze();
+  // Hide the demo cursor — it stays visible across step transitions for smooth
+  // movement in pointer-only modes (e.g. Alex Rivera), so we only clear it here
+  // on full demo exit, never on individual step changes.
+  const _exitCursor = document.getElementById('demo-cursor');
+  if(_exitCursor) _exitCursor.classList.remove('visible','hovering','clicking');
   // Remove any lingering nav pulses / targets
   document.querySelectorAll('.ni.demo-nav-pulse,.ni.demo-nav-target').forEach(n=>{n.classList.remove('demo-nav-pulse','demo-nav-target');});
   // Clean up spotlight + cursor + ripple
