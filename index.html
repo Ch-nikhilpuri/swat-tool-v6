@@ -10850,6 +10850,84 @@ let _activePersona = null;   // 'buyer' | 'planner' | 'plant' | 'expert'
 let _activeDemoScript = DEMO_SCRIPT; // default to buyer script
 
 // ═══════════════════════════════════════════════════════════════════════════
+// DEMO ORCHESTRATOR — single source of truth for playback control.
+// Solves the "stale callback" bug where forward/rewind/pause/resume could
+// leave old narration, old highlights, or old auto-advance timers firing
+// against the new step. Every async callback captures a token; when the
+// token no longer matches the current playback session it aborts silently.
+// ═══════════════════════════════════════════════════════════════════════════
+const DEMO_FSM = { IDLE:'IDLE', PLAYING:'PLAYING', PAUSED:'PAUSED', SEEKING:'SEEKING', COMPLETED:'COMPLETED', ERROR:'ERROR_RECOVERY' };
+let _demoFsmState   = DEMO_FSM.IDLE;
+let _demoToken      = 0;     // monotonically increasing; ANY transition bumps it
+let _demoTrackedTimers = []; // setTimeout ids that must be cancelled on transition
+
+// Allowed FSM transitions — anything else is rejected (logged + ignored)
+const _DEMO_FSM_GRAPH = {
+  IDLE:      ['PLAYING'],
+  PLAYING:   ['PAUSED','SEEKING','COMPLETED','IDLE','ERROR_RECOVERY'],
+  PAUSED:    ['PLAYING','SEEKING','IDLE','ERROR_RECOVERY'],
+  SEEKING:   ['PLAYING','PAUSED','IDLE','ERROR_RECOVERY'],
+  COMPLETED: ['IDLE','PLAYING'],
+  ERROR_RECOVERY: ['IDLE','PLAYING'],
+};
+function _demoSetState(next, reason){
+  const allowed = (_DEMO_FSM_GRAPH[_demoFsmState] || []).includes(next);
+  if(!allowed && next !== _demoFsmState){
+    console.warn('[Demo FSM] rejected transition', _demoFsmState, '→', next, reason||'');
+    return false;
+  }
+  if(next !== _demoFsmState){
+    console.log('[Demo FSM]', _demoFsmState, '→', next, reason ? '· '+reason : '');
+    _demoFsmState = next;
+  }
+  return true;
+}
+
+// Capture the current token. Async callbacks should use this AT REGISTRATION
+// time and compare against `_demoToken` when they fire.
+function _demoSnapshotToken(){ return _demoToken; }
+function _demoTokenIsStale(snap){ return snap !== _demoToken; }
+
+// Wrapper for setTimeout that auto-invalidates on next cleanup. Use this for any
+// scheduled work that belongs to the current playback step.
+function _demoSchedule(fn, ms){
+  const snap = _demoToken;
+  const tid = setTimeout(()=>{
+    if(snap !== _demoToken) return;       // stale → abort
+    try { fn(); } catch(e) { console.warn('[Demo] schedule error', e); }
+  }, ms);
+  _demoTrackedTimers.push(tid);
+  return tid;
+}
+
+// The big cleanup. Called by every transition (forward, rewind, pause-then-step,
+// jump, exit). Increments the token first so any in-flight async work becomes stale.
+function _demoCleanupStep(reason){
+  _demoToken++;                              // 1) invalidate everything in flight
+  // 2) cancel all tracked timers
+  _demoTrackedTimers.forEach(t=>clearTimeout(t));
+  _demoTrackedTimers = [];
+  // 3) cancel legacy sub-point timers (older array, still in use)
+  try { _clearSubPointTimers(); } catch(e){}
+  // 4) stop voice
+  if(window.speechSynthesis) { try { speechSynthesis.cancel(); } catch(e){} }
+  _demoSpeaking = false;
+  // 5) clear auto-advance
+  clearTimeout(_demoAutoTimer);
+  _demoAutoTimer = null;
+  // 6) clear visual demo overlays
+  try { _clearPointer(); }  catch(e){}
+  try { _clearRing(); }     catch(e){}
+  try { clearDemoTicker();} catch(e){}
+  try { _hideSpotlight(); } catch(e){}
+  // 7) reset avatar speaking state
+  const av = document.getElementById('demo-avatar');
+  if(av) av.classList.remove('av-pointing','av-speaking','av-transit');
+  // Don't touch _demoRunning here — start/exit own that flag.
+  console.log('[Demo] cleanup', { reason: reason||'?', newToken: _demoToken, step: _demoStep });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PERSONA-SPECIFIC DEMO SCRIPTS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -11456,12 +11534,19 @@ function _prepareNarrationText(text){
 }
 
 // ── Speak a line of narration ────────────────────────────────────────────────
+// Capture the playback token at start. Every async hop (utterance onend, the
+// inter-sentence pause setTimeout, the final onEnd callback) re-checks the
+// token. If the orchestrator has bumped it (forward/rewind/pause/exit), this
+// narration thread aborts silently — no overlap, no out-of-order sentences.
 function demoSpeak(text, onEnd){
   if(!window.speechSynthesis){ onEnd && onEnd(); return; }
   speechSynthesis.cancel();
   _demoSpeaking = true;
   const _spAv = document.getElementById('demo-avatar');
   if(_spAv) _spAv.classList.add('av-speaking');
+
+  // ── Capture playback identity at the moment narration starts.
+  const sessionToken = _demoToken;
 
   // Pick this persona's voice + profile
   const personaKey = _activePersona || 'buyer';
@@ -11475,12 +11560,18 @@ function demoSpeak(text, onEnd){
   const sentences = prepared.match(/[^.!?]+[.!?]+/g) || [prepared];
   let idx = 0;
 
+  function isStale(){ return sessionToken !== _demoToken; }
+
   function speakNext(){
+    if(isStale()){
+      _demoSpeaking = false;
+      return;                                    // abort — newer step active
+    }
     if(idx >= sentences.length || !_demoRunning){
       _demoSpeaking = false;
       const _spAvDone = document.getElementById('demo-avatar');
       if(_spAvDone){ _spAvDone.classList.remove('av-speaking','av-pointing'); }
-      onEnd && onEnd();
+      if(!isStale()) onEnd && onEnd();
       return;
     }
     const utt = new SpeechSynthesisUtterance(sentences[idx].trim());
@@ -11491,11 +11582,20 @@ function demoSpeak(text, onEnd){
     if(voice && voice.lang) utt.lang = voice.lang;
 
     utt.onend = ()=>{
+      if(isStale()) { _demoSpeaking = false; return; }
       idx++;
-      // Conversational pause between sentences — small breath for natural cadence
-      setTimeout(speakNext, profile.sentencePauseMs);
+      // Conversational pause between sentences — TRACKED so cleanup can cancel it.
+      const tid = setTimeout(()=>{
+        if(isStale()) { _demoSpeaking = false; return; }
+        speakNext();
+      }, profile.sentencePauseMs);
+      _demoTrackedTimers.push(tid);
     };
-    utt.onerror = ()=>{ idx++; speakNext(); };
+    utt.onerror = ()=>{
+      if(isStale()) { _demoSpeaking = false; return; }
+      idx++;
+      speakNext();
+    };
     speechSynthesis.speak(utt);
 
     // Update typewriter display while speaking — show what's about to be spoken
@@ -11719,6 +11819,9 @@ function _clearSubPointTimers(){
 }
 function _demoMoveSpotlight(selector, opts){
   if(!_demoRunning) return;
+  // Capture current playback token; the 380ms internal setTimeout (below) checks
+  // this on fire so a stale sub-point cannot paint a highlight on the new step.
+  const snap = _demoToken;
   opts = opts || {};
   // Per-call cursorOnly override (in addition to the step-level _isCursorOnlyStep flag).
   // Lets a single step have BOTH cursor-only sub-points (gentle pointing) AND
@@ -11739,7 +11842,8 @@ function _demoMoveSpotlight(selector, opts){
   // Scroll the FIRST target into view (centers both axes)
   targets[0].scrollIntoView({behavior:'smooth', block:'center', inline:'center'});
 
-  setTimeout(()=>{
+  const tid = setTimeout(()=>{
+    if(snap !== _demoToken) return;          // step changed under us — abort
     if(!_demoRunning) return;
 
     // Compute the union visible-rect across all targets
@@ -11816,6 +11920,7 @@ function _demoMoveSpotlight(selector, opts){
     if(line){ line.setAttribute('x2', cx); line.setAttribute('y2', cy); }
     if(dot){  dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); }
   }, 380);
+  _demoTrackedTimers.push(tid);
 }
 
 // Show spotlight on a specific target element
@@ -11976,10 +12081,14 @@ function hideDemoAvatar(){
 }
 
 function startDemo(){
+  // Clean slate — bump token so any leftover async from a previous run dies.
+  _demoCleanupStep('startDemo');
+  _demoSetState(DEMO_FSM.IDLE, 'startDemo:init');
   demoInitVoice();
   _demoStep    = 0;
   _demoRunning = true;
   _demoAuto    = true;
+  _demoSetState(DEMO_FSM.PLAYING, 'startDemo:playing');
   if(!_activePersona) _activePersona = 'buyer';
   if(!_activeDemoScript) _activeDemoScript = DEMO_SCRIPT;
 
@@ -12153,12 +12262,12 @@ var _PRESENTER_IMG_SRC = "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHY
 // ── Exit the demo ────────────────────────────────────────────────────────────
 function exitDemo(){
   const wasLastStep = _demoStep >= _activeDemoScript.length - 1;
+  _demoSetState(wasLastStep ? DEMO_FSM.COMPLETED : DEMO_FSM.IDLE, 'exitDemo');
+  _demoCleanupStep('exitDemo');
   _demoRunning = false;
   _demoAuto    = false;
   _demoSpeaking= false;
-  clearTimeout(_demoAutoTimer);
-  _clearSubPointTimers();
-  if(window.speechSynthesis) speechSynthesis.cancel();
+  _demoSetState(DEMO_FSM.IDLE, 'exit-final');
 
   const narrator = document.getElementById('demo-narrator');
   if(narrator) narrator.style.display='none';
@@ -12210,15 +12319,20 @@ function exitDemo(){
 }
 
 // ── Manual step navigation ───────────────────────────────────────────────────
-function demoStep(dir){
-  _clearSubPointTimers();
-  _clearPointer(); _clearRing(); clearDemoTicker();
-  const av=document.getElementById('demo-avatar');
-  if(av) av.classList.remove('av-pointing','av-speaking');
-  clearTimeout(_demoAutoTimer);
-  if(window.speechSynthesis) speechSynthesis.cancel();
-  _demoSpeaking = false;
-  _demoStep = Math.max(0, Math.min(_activeDemoScript.length-1, _demoStep + dir));
+// Step forward (dir=+1) or backward (dir=-1). Also accepts an explicit step
+// index when called as demoStep('jump', idx). All paths go through cleanup so
+// no stale narration/highlight/timer can survive the transition.
+function demoStep(dir, jumpTo){
+  if(!_demoRunning) return;
+  _demoSetState(DEMO_FSM.SEEKING, 'demoStep('+dir+')');
+  _demoCleanupStep('demoStep:'+dir);
+  if(dir === 'jump' && typeof jumpTo === 'number'){
+    _demoStep = Math.max(0, Math.min(_activeDemoScript.length-1, jumpTo));
+  } else {
+    _demoStep = Math.max(0, Math.min(_activeDemoScript.length-1, _demoStep + (dir||0)));
+  }
+  // Auto-resume into PLAYING after the seek lands
+  _demoSetState(DEMO_FSM.PLAYING, 'step-rendered');
   renderDemoStep();
 }
 
@@ -12280,16 +12394,25 @@ function _resetDemoControlBarPosition(){
 }
 
 function demoPauseResume(){
+  if(!_demoRunning) return;
   _demoAuto = !_demoAuto;
   const icon = _demoAuto ? '⏸' : '▶';
   ['dn-pause-btn','mtg-pause-btn','dcb-pause-btn'].forEach(id=>{
     const el = document.getElementById(id); if(el) el.textContent = icon;
   });
   if(!_demoAuto){
+    // PAUSE — keep current step + position; just stop time-based progression.
+    _demoSetState(DEMO_FSM.PAUSED, 'user pause');
     clearTimeout(_demoAutoTimer);
-    if(window.speechSynthesis) speechSynthesis.pause();
+    if(window.speechSynthesis) { try { speechSynthesis.pause(); } catch(e){} }
   } else {
-    if(window.speechSynthesis) speechSynthesis.resume();
+    // RESUME — only continue the SAME step, never start a new agent thread.
+    _demoSetState(DEMO_FSM.PLAYING, 'user resume');
+    if(window.speechSynthesis){
+      try {
+        if(speechSynthesis.paused) speechSynthesis.resume();
+      } catch(e){}
+    }
     if(!_demoSpeaking) scheduleNextStep(0);
   }
 }
@@ -12309,11 +12432,17 @@ function demoToggleVoice(){
 function scheduleNextStep(delay){
   clearTimeout(_demoAutoTimer);
   if(!_demoAuto || !_demoRunning) return;
+  // Token-guarded auto-advance: if the user forwards/rewinds/exits before the
+  // timer fires, the cleanup will have bumped _demoToken and this callback
+  // will silently abort, instead of force-advancing a step the user already left.
+  const snap = _demoToken;
   _demoAutoTimer = setTimeout(()=>{
+    if(snap !== _demoToken) return;          // stale (user navigated)
     if(!_demoRunning || !_demoAuto) return;
     if(_demoStep < _activeDemoScript.length-1){
-      _demoStep++;
-      renderDemoStep();
+      // Drive through demoStep so the SAME cleanup runs here as for the user's
+      // manual Next button — single source of truth for transitions.
+      demoStep(1);
     } else {
       exitDemo();
     }
@@ -12452,7 +12581,11 @@ function renderDemoStep(){
   // Cancel any leftover sub-point timers from the previous step
   _clearSubPointTimers();
 
-  setTimeout(()=>{
+  // Token snapshot for the entire step's setup chain — guarantees that an old
+  // step's 1100ms "show pointer" callback can never paint into the new step.
+  const _stepRenderToken = _demoToken;
+  const _outerTid = setTimeout(()=>{
+    if(_stepRenderToken !== _demoToken) return;  // user navigated before pointer fired
     const ptr = step.pointer || step.highlight;
     if(ptr){
       demoPointAt(ptr);
@@ -12472,28 +12605,43 @@ function renderDemoStep(){
     // narrationDelay (if set) shifts all sub-points so they stay synced.
     const _subShift = step.narrationDelay || 0;
     if(Array.isArray(step.subPoints)){
+      // Capture the playback token at the moment we register these sub-point timers.
+      // If the user forwards/rewinds before any sub-point fires, the token bumps
+      // and the callback aborts — preventing a stale sub-point from drawing a
+      // highlight that belongs to the previous step.
+      const stepToken = _demoToken;
       step.subPoints.forEach(sub=>{
         if(!sub || !sub.pointer) return;
         const _co = !!sub.cursorOnly;
         const tid = setTimeout(()=>{
+          if(stepToken !== _demoToken) return;  // user navigated — drop this
           if(_demoRunning) _demoMoveSpotlight(sub.pointer, {cursorOnly:_co});
         }, Math.max(0, (sub.at || 0) + _subShift));
         _demoSubPointTimers.push(tid);
+        _demoTrackedTimers.push(tid);
       });
     }
   }, 1100);
+  _demoTrackedTimers.push(_outerTid);
 
   // ── Speak narration then auto-advance ───────────────────────────────
   // step.narrationDelay (ms): adds an extra silent pause before narration starts,
   // giving the audience time to absorb the page (e.g. Supplier Commit Tracker intro)
   const _narrStart = 500 + (step.narrationDelay || 0);
   if(_demoVoiceOn && step.narration && window.speechSynthesis){
-    setTimeout(()=>{
+    // Token-guarded narration start — if user navigates during the silent
+    // pre-narration pause, the delayed demoSpeak call never fires.
+    const narrToken = _demoToken;
+    const _narrTid = setTimeout(()=>{
+      if(narrToken !== _demoToken) return;
       demoSpeak(step.narration, ()=>{
-        // After speaking ends, wait 1.5s then advance
+        // After speaking ends, wait 1.5s then advance — guarded again so a
+        // late onEnd from a stale speech doesn't queue a wrong-step advance.
+        if(narrToken !== _demoToken) return;
         if(_demoAuto && _demoRunning) scheduleNextStep(1500);
       });
     }, _narrStart);
+    _demoTrackedTimers.push(_narrTid);
   } else {
     // No voice: use step duration for auto-advance
     const dur = step.duration || 8000;
